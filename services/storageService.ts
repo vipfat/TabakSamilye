@@ -1,11 +1,8 @@
-import { SavedMix, MixIngredient, AiAnalysisResult, Flavor } from '../types';
-import { AVAILABLE_FLAVORS } from '../constants';
+import { SavedMix, MixIngredient, Flavor, FlavorBrand } from '../types';
+import { AVAILABLE_FLAVORS, DEFAULT_GOOGLE_SCRIPT_URL } from '../constants';
 
-const STORAGE_KEY = 'hookah_alchemist_history_v1';
-const FLAVORS_STORAGE_KEY = 'hookah_alchemist_flavors_v1';
-const CLOUD_ID_KEY = 'hookah_alchemist_cloud_id_v1';
-
-const BLOB_API_URL = 'https://jsonblob.com/api/jsonBlob';
+const STORAGE_KEY = 'hookah_alchemist_history_v2';
+const GOOGLE_SCRIPT_URL_KEY = 'hookah_alchemist_gscript_url';
 
 // Robust ID generator with fallback
 const generateId = (): string => {
@@ -23,137 +20,200 @@ const generateId = (): string => {
 };
 
 /**
- * CLOUD MANAGEMENT
+ * GOOGLE SHEETS INTEGRATION
  */
 
-export const getCloudId = (): string | null => {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem(CLOUD_ID_KEY);
+export const getGoogleScriptUrl = (): string => {
+    return localStorage.getItem(GOOGLE_SCRIPT_URL_KEY) || DEFAULT_GOOGLE_SCRIPT_URL;
 };
 
-export const setCloudId = (id: string) => {
-    if (typeof window === 'undefined') return;
-    localStorage.setItem(CLOUD_ID_KEY, id);
+export const setGoogleScriptUrl = (url: string) => {
+    if (!url || url === DEFAULT_GOOGLE_SCRIPT_URL) {
+        localStorage.removeItem(GOOGLE_SCRIPT_URL_KEY);
+    } else {
+        localStorage.setItem(GOOGLE_SCRIPT_URL_KEY, url.trim());
+    }
 };
 
-export const createCloudStorage = async (initialData: Flavor[]): Promise<string> => {
+interface FetchResult {
+    flavors: Flavor[];
+    pin: string | null;
+    brands: string[];
+}
+
+// Fetch flavors from Google Apps Script
+export const fetchFlavors = async (): Promise<FetchResult> => {
+    const url = getGoogleScriptUrl();
+    
+    if (!url) {
+        return { flavors: AVAILABLE_FLAVORS, pin: null, brands: [] };
+    }
+
     try {
-        const response = await fetch(BLOB_API_URL, {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
+        // Cache Buster to prevent browser from serving stale JSON
+        const fetchUrl = `${url}${url.includes('?') ? '&' : '?'}nocache=${Date.now()}`;
+
+        const response = await fetch(fetchUrl, {
+            method: 'GET',
+            redirect: 'follow',
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error(`Ошибка сети: ${response.status}`);
+        }
+
+        const text = await response.text();
+        
+        // Google Scripts error page detection
+        if (text.trim().startsWith('<') || text.includes('Google Drive')) {
+            throw new Error("Ошибка доступа к скрипту. Проверьте URL.");
+        }
+
+        try {
+            const data = JSON.parse(text);
+            
+            let flavors: Flavor[] = [];
+            let pin: string | null = null;
+            let brands: string[] = [];
+
+            // Handle different potential JSON structures
+            let rawFlavors: any[] = [];
+
+            if (Array.isArray(data)) {
+                // Structure: [ {name: ...}, {name: ...} ]
+                rawFlavors = data;
+            } else if (data && typeof data === 'object') {
+                // Structure: { flavors: [...], pin: "...", brands: [...] }
+                if (Array.isArray(data.flavors)) {
+                    rawFlavors = data.flavors;
+                }
+                // Try to extract PIN and Brands if available
+                if (data.pin) pin = String(data.pin).trim();
+                if (Array.isArray(data.brands)) {
+                    brands = data.brands.map((b: any) => String(b).trim()).filter((b: string) => b.length > 0);
+                }
+            }
+
+            // Process Flavors
+            flavors = rawFlavors.map((f: any) => {
+                // Helper to find property regardless of case (Name vs name)
+                const getProp = (obj: any, keys: string[]) => {
+                    for (const k of keys) {
+                        if (obj[k] !== undefined) return obj[k];
+                    }
+                    return undefined;
+                };
+
+                // Extract values with fallbacks for different capitalizations
+                const rawName = getProp(f, ['name', 'Name', 'NAME']);
+                const rawBrand = getProp(f, ['brand', 'Brand', 'BRAND']);
+                const rawDesc = getProp(f, ['description', 'Description', 'desc', 'Desc']);
+                const rawColor = getProp(f, ['color', 'Color', 'colour']);
+                const rawAvail = getProp(f, ['isAvailable', 'available', 'IsAvailable', 'Available', 'status']);
+                const rawId = getProp(f, ['id', 'Id', 'ID', 'key']);
+
+                // Normalize availability: Default to TRUE unless explicitly False
+                // This ensures that if the column is empty, we show the flavor (safer).
+                let isAvailable = true;
+                if (rawAvail !== undefined && rawAvail !== null && rawAvail !== '') {
+                    const s = String(rawAvail).toLowerCase().trim();
+                    // Check for explicit negative values
+                    if (['false', '0', 'no', 'нет', '-', 'off'].includes(s)) {
+                        isAvailable = false;
+                    }
+                    // Note: We don't check for 'true' specifically anymore, we assume true unless marked false.
+                }
+
+                return {
+                    id: String(rawId || generateId()),
+                    name: String(rawName || "Без названия").trim(),
+                    brand: String(rawBrand || FlavorBrand.OTHER).trim(),
+                    description: String(rawDesc || "").trim(),
+                    color: String(rawColor || "#cccccc").trim(),
+                    isAvailable: isAvailable
+                };
+            });
+
+            return { flavors, pin, brands };
+
+        } catch (parseError) {
+             console.error("JSON Parse Error:", parseError);
+             throw new Error("Ошибка обработки данных от Google (неверный JSON).");
+        }
+
+    } catch (e: any) {
+        console.error("Error fetching from Google Sheet:", e);
+        // Return empty lists so the app knows fetch failed but does not crash
+        return { flavors: [], pin: null, brands: [] };
+    }
+};
+
+interface SaveResult {
+    success: boolean;
+    message: string;
+}
+
+// Helper for sending data
+const sendToGoogleScript = async (payload: any): Promise<SaveResult> => {
+    const url = getGoogleScriptUrl();
+    if (!url) return { success: false, message: "URL скрипта не настроен" };
+    if (!navigator.onLine) return { success: false, message: "Нет интернета" };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+    try {
+        await fetch(url, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
+            redirect: 'follow',
+            headers: { 
+                'Content-Type': 'text/plain;charset=utf-8' 
             },
-            body: JSON.stringify(initialData)
+            body: JSON.stringify(payload),
+            signal: controller.signal
         });
 
-        if (!response.ok) throw new Error('Failed to create cloud storage');
-        
-        const location = response.headers.get('Location');
-        if (!location) throw new Error('No location header returned');
-        
-        // Extract ID from URL (https://jsonblob.com/api/jsonBlob/UUID)
-        const parts = location.split('/');
-        const id = parts[parts.length - 1];
-        
-        setCloudId(id);
-        return id;
-    } catch (e) {
-        console.error("Cloud creation failed:", e);
-        throw e;
+        clearTimeout(timeoutId);
+        return { success: true, message: "Успешно отправлено" };
+    } catch (e: any) {
+        clearTimeout(timeoutId);
+        console.error("Save error:", e);
+        return { success: false, message: `Ошибка отправки: ${e.message}` };
     }
 };
 
-/**
- * FLAVORS MANAGEMENT
- */
-
-// Synchronous fallback for initial state (from cache)
-export const getStoredFlavorsLocal = (): Flavor[] => {
-    if (typeof window === 'undefined') return AVAILABLE_FLAVORS;
-    try {
-        const raw = localStorage.getItem(FLAVORS_STORAGE_KEY);
-        if (!raw) return AVAILABLE_FLAVORS;
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : AVAILABLE_FLAVORS;
-    } catch (e) {
-        return AVAILABLE_FLAVORS;
-    }
-};
-
-// Async fetcher (tries Cloud first, falls back to Local)
-export const fetchFlavors = async (): Promise<Flavor[]> => {
-    const cloudId = getCloudId();
+// 1. Save ONLY Flavors and Brands
+export const saveFlavorsAndBrands = async (flavors: Flavor[], brands: string[]): Promise<SaveResult> => {
+    const validBrands = brands.filter(b => b && b.trim() !== "");
     
-    // 1. Try Cloud
-    if (cloudId) {
-        try {
-            const response = await fetch(`${BLOB_API_URL}/${cloudId}`);
-            if (response.ok) {
-                const data = await response.json();
-                if (Array.isArray(data)) {
-                    // Update local cache
-                    localStorage.setItem(FLAVORS_STORAGE_KEY, JSON.stringify(data));
-                    return data;
-                }
-            } else {
-                console.warn("Cloud fetch failed, using local cache");
-            }
-        } catch (e) {
-            console.warn("Cloud error, using local cache", e);
-        }
-    }
-
-    // 2. Fallback to Local Cache
-    return getStoredFlavorsLocal();
+    const payload = {
+        action: 'saveFlavors',
+        flavors: flavors,
+        brands: validBrands
+    };
+    return sendToGoogleScript(payload);
 };
 
-// Save (Updates Cloud if connected + Local Cache)
-export const saveStoredFlavors = async (flavors: Flavor[]) => {
-    try {
-        // Always save local first for immediate UI update
-        localStorage.setItem(FLAVORS_STORAGE_KEY, JSON.stringify(flavors));
-
-        const cloudId = getCloudId();
-        if (cloudId) {
-            // Fire and forget cloud update (or await if critical)
-            await fetch(`${BLOB_API_URL}/${cloudId}`, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                body: JSON.stringify(flavors)
-            });
-        }
-    } catch (e) {
-        console.error("Error saving flavors", e);
-    }
-};
-
-export const resetStoredFlavors = async (): Promise<Flavor[]> => {
-    try {
-        localStorage.removeItem(FLAVORS_STORAGE_KEY);
-        
-        const cloudId = getCloudId();
-        if (cloudId) {
-             await fetch(`${BLOB_API_URL}/${cloudId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(AVAILABLE_FLAVORS)
-            });
-        }
-        return AVAILABLE_FLAVORS;
-    } catch (e) {
-        return AVAILABLE_FLAVORS;
-    }
+// 2. Save ONLY PIN
+export const saveGlobalPin = async (pin: string): Promise<SaveResult> => {
+    const payload = {
+        action: 'savePin',
+        pin: pin
+    };
+    return sendToGoogleScript(payload);
 };
 
 /**
- * HISTORY MANAGEMENT (Remains Local for User Privacy)
+ * HISTORY MANAGEMENT (Local User Storage)
  */
 
-export const saveMixToHistory = (userId: number, ingredients: MixIngredient[], aiAnalysis?: AiAnalysisResult): SavedMix => {
+export const saveMixToHistory = (userId: number, ingredients: MixIngredient[], name: string): SavedMix => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const allMixes: SavedMix[] = raw ? JSON.parse(raw) : [];
@@ -163,7 +223,7 @@ export const saveMixToHistory = (userId: number, ingredients: MixIngredient[], a
       userId,
       timestamp: Date.now(),
       ingredients,
-      aiAnalysis,
+      name: name || "Мой микс",
       isFavorite: false
     };
 
@@ -177,7 +237,7 @@ export const saveMixToHistory = (userId: number, ingredients: MixIngredient[], a
         userId,
         timestamp: Date.now(),
         ingredients,
-        aiAnalysis,
+        name: name || "Мой микс",
         isFavorite: false
     };
   }

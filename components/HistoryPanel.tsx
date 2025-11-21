@@ -31,7 +31,7 @@ const HistoryPanel: React.FC<HistoryPanelProps> = ({ isOpen, onClose, user, onLo
     e.stopPropagation();
     e.preventDefault();
     
-    // Optimistic update: update UI immediately before storage operation
+    // Optimistic update
     setMixes(prev => prev.map(m => 
         m.id === mixId ? { ...m, isFavorite: !m.isFavorite } : m
     ));
@@ -43,7 +43,7 @@ const HistoryPanel: React.FC<HistoryPanelProps> = ({ isOpen, onClose, user, onLo
     e.stopPropagation();
     e.preventDefault();
     
-    // Optimistic update: remove from UI immediately
+    // Optimistic update
     setMixes(prev => prev.filter(m => m.id !== mixId));
     
     deleteMix(mixId);
@@ -102,7 +102,7 @@ const HistoryPanel: React.FC<HistoryPanelProps> = ({ isOpen, onClose, user, onLo
                  <div className="flex justify-between items-start mb-2">
                     <div className="flex-1 pr-4">
                         <h3 className="font-bold text-white text-lg line-clamp-1">
-                            {mix.aiAnalysis ? mix.aiAnalysis.title : 'Микс без названия'}
+                            {mix.name || 'Микс без названия'}
                         </h3>
                         <span className="text-xs text-slate-500">
                             {new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(mix.timestamp)}

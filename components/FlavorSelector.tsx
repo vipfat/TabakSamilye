@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
-import { Flavor, FlavorCategory } from '../types';
+
+
+import React, { useState, useMemo } from 'react';
+import { Flavor } from '../types';
 import { Search, Check, X, Filter } from 'lucide-react';
 
 interface FlavorSelectorProps {
@@ -7,21 +9,34 @@ interface FlavorSelectorProps {
   onClose: () => void;
   onToggle: (flavor: Flavor) => void;
   currentFlavorIds: string[];
-  availableFlavors: Flavor[]; // New prop to receive dynamic list
+  availableFlavors: Flavor[];
 }
 
 const FlavorSelector: React.FC<FlavorSelectorProps> = ({ isOpen, onClose, onToggle, currentFlavorIds, availableFlavors }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<FlavorCategory | 'Все'>('Все');
+  const [selectedBrand, setSelectedBrand] = useState<string>('Все');
+
+  // Dynamically extract unique brands from the available flavors list
+  // This ensures custom brands added via "Other" appear in the filter tabs automatically.
+  const brands = useMemo(() => {
+    const uniqueBrands = Array.from(new Set(availableFlavors.map(f => f.brand))).sort();
+    return ['Все', ...uniqueBrands];
+  }, [availableFlavors]);
 
   if (!isOpen) return null;
 
-  const categories = ['Все', ...Object.values(FlavorCategory)];
-
   const filteredFlavors = availableFlavors.filter(flavor => {
-    const matchesSearch = flavor.name.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = selectedCategory === 'Все' || flavor.category === selectedCategory;
-    return matchesSearch && matchesCategory;
+    // Safely cast to string to handle potential data issues (e.g. numbers in name field)
+    const name = String(flavor.name || "");
+    const desc = String(flavor.description || "");
+    const search = searchTerm.toLowerCase();
+
+    const matchesSearch = 
+        name.toLowerCase().includes(search) || 
+        desc.toLowerCase().includes(search);
+    
+    const matchesBrand = selectedBrand === 'Все' || flavor.brand === selectedBrand;
+    return matchesSearch && matchesBrand;
   });
 
   return (
@@ -45,24 +60,24 @@ const FlavorSelector: React.FC<FlavorSelectorProps> = ({ isOpen, onClose, onTogg
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
             <input
               type="text"
-              placeholder="Поиск вкусов..."
+              placeholder="Поиск вкуса или описание..."
               className="w-full bg-slate-800 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
           <div className="flex overflow-x-auto gap-2 pb-1 scrollbar-hide">
-            {categories.map(cat => (
+            {brands.map(brand => (
               <button
-                key={cat}
-                onClick={() => setSelectedCategory(cat as any)}
+                key={brand}
+                onClick={() => setSelectedBrand(brand)}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                  selectedCategory === cat 
+                  selectedBrand === brand 
                     ? 'bg-emerald-600 text-white' 
                     : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
                 }`}
               >
-                {cat}
+                {brand}
               </button>
             ))}
           </div>
@@ -82,14 +97,14 @@ const FlavorSelector: React.FC<FlavorSelectorProps> = ({ isOpen, onClose, onTogg
                 <button
                   key={flavor.id}
                   onClick={() => onToggle(flavor)}
-                  className={`w-full flex items-center p-3 rounded-xl transition-all group text-left border ${
+                  className={`w-full flex items-start p-3 rounded-xl transition-all group text-left border ${
                     isSelected 
                         ? 'bg-emerald-900/20 border-emerald-500/50' 
                         : 'hover:bg-slate-800 border-transparent'
                   }`}
                 >
                   <div 
-                    className="w-10 h-10 rounded-full flex items-center justify-center mr-4 shadow-sm relative"
+                    className="w-10 h-10 shrink-0 rounded-full flex items-center justify-center mr-4 shadow-sm relative mt-1"
                     style={{ backgroundColor: flavor.color }}
                   >
                       {isSelected && (
@@ -97,22 +112,21 @@ const FlavorSelector: React.FC<FlavorSelectorProps> = ({ isOpen, onClose, onTogg
                             <Check size={20} className="text-white" />
                         </div>
                       )}
-                      {!isSelected && (
-                        <span className="text-xs font-bold text-white/80 mix-blend-hard-light">
-                            {flavor.name.substring(0,2).toUpperCase()}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-center">
+                        <h3 className={`text-sm font-bold truncate pr-2 ${isSelected ? 'text-emerald-300' : 'text-white group-hover:text-emerald-200'}`}>
+                        {flavor.name}
+                        </h3>
+                        <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700 whitespace-nowrap">
+                            {flavor.brand}
                         </span>
-                      )}
-                  </div>
-                  <div className="flex-1">
-                    <h3 className={`text-sm font-semibold transition-colors ${isSelected ? 'text-emerald-300' : 'text-white group-hover:text-emerald-200'}`}>
-                      {flavor.name}
-                    </h3>
-                    <span className="text-xs text-slate-500">{flavor.category}</span>
-                  </div>
-                  <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors ${
-                      isSelected ? 'bg-emerald-500 border-emerald-500' : 'border-slate-600'
-                  }`}>
-                      {isSelected && <Check size={12} className="text-white" />}
+                    </div>
+                    {flavor.description && (
+                        <p className="text-xs text-slate-500 mt-0.5 line-clamp-2 leading-tight">
+                            {flavor.description}
+                        </p>
+                    )}
                   </div>
                 </button>
               )

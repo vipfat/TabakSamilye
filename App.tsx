@@ -1,20 +1,17 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
-import { Plus, RotateCcw, Leaf, Lock, UserCircle, Save, Eye, Cloud, Wifi } from 'lucide-react';
-import { Flavor, MixIngredient, TelegramUser, SavedMix, AiAnalysisResult } from './types';
-import { MAX_BOWL_SIZE } from './constants';
+import { Plus, RotateCcw, Leaf, Lock, UserCircle, Save, Eye, PenLine, RefreshCcw, Loader2 } from 'lucide-react';
+import { Flavor, MixIngredient, TelegramUser, SavedMix } from './types';
+import { MAX_BOWL_SIZE, AVAILABLE_FLAVORS } from './constants';
 import { getTelegramUser } from './services/telegramService';
 import { 
   saveMixToHistory, 
-  getStoredFlavorsLocal, 
   fetchFlavors,
-  saveStoredFlavors, 
-  resetStoredFlavors,
-  getCloudId 
+  saveGlobalPin
 } from './services/storageService';
 import BowlChart from './components/BowlChart';
 import FlavorSelector from './components/FlavorSelector';
 import MixControls from './components/MixControls';
-import AiAssistant from './components/AiAssistant';
 import AdminPanel from './components/AdminPanel';
 import MasterMode from './components/MasterMode';
 import HistoryPanel from './components/HistoryPanel';
@@ -24,12 +21,12 @@ const App: React.FC = () => {
   const [user, setUser] = useState<TelegramUser | null>(null);
   
   // App State
-  // Initialize from local cache for instant render
-  const [allFlavors, setAllFlavors] = useState<Flavor[]>(() => getStoredFlavorsLocal());
+  const [allFlavors, setAllFlavors] = useState<Flavor[]>(AVAILABLE_FLAVORS);
+  const [customBrands, setCustomBrands] = useState<string[]>([]);
   const [mix, setMix] = useState<MixIngredient[]>([]);
-  const [aiAnalysis, setAiAnalysis] = useState<AiAnalysisResult | null>(null);
-  const [isCloudConnected, setIsCloudConnected] = useState(false);
-
+  const [mixName, setMixName] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  
   // UI State
   const [isSelectorOpen, setIsSelectorOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -38,35 +35,46 @@ const App: React.FC = () => {
   // Admin/Secret State
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [secretClicks, setSecretClicks] = useState(0);
+  
+  // PIN Pad State
   const [showPinPad, setShowPinPad] = useState(false);
+  const [isFetchingPin, setIsFetchingPin] = useState(false);
   const [pinInput, setPinInput] = useState('');
+  const [adminPin, setAdminPin] = useState('0000'); // Will be updated from cloud
+  
+  // PIN Change Logic
+  const [lockClickCount, setLockClickCount] = useState(0);
+  const [isChangingPin, setIsChangingPin] = useState(false);
+  const [newPin, setNewPin] = useState('');
+  const [savePinStatus, setSavePinStatus] = useState('');
 
   // Initialization
   useEffect(() => {
     const tgUser = getTelegramUser();
     setUser(tgUser);
-    setIsCloudConnected(!!getCloudId());
-
-    // Initial Fetch (Refresh from cloud if available)
-    const loadData = async () => {
-        const flavors = await fetchFlavors();
-        setAllFlavors(flavors);
-    };
     loadData();
-
-    // POLLING: Check for global updates every 10 seconds if cloud is active
-    const intervalId = setInterval(async () => {
-        if (getCloudId()) {
-            const flavors = await fetchFlavors();
-            // Only update if deep comparison needed? React state setter handles ref equality usually,
-            // but here we just set it. Optimally check if changed, but for this size it's fine.
-            setAllFlavors(flavors);
-            setIsCloudConnected(true);
-        }
-    }, 10000);
-
-    return () => clearInterval(intervalId);
   }, []);
+
+  const loadData = async () => {
+      setIsLoading(true);
+      try {
+          const { flavors, pin, brands } = await fetchFlavors();
+          if (flavors && flavors.length > 0) {
+              setAllFlavors(flavors);
+          }
+          if (pin && pin !== "undefined") {
+              console.log("Initial PIN Load:", pin);
+              setAdminPin(pin);
+          }
+          if (brands && brands.length > 0) {
+              setCustomBrands(brands);
+          }
+      } catch (e) {
+          console.error("Failed to load initial data", e);
+      } finally {
+          setIsLoading(false);
+      }
+  };
 
   // Filtered available flavors for the selector
   const availableFlavors = useMemo(() => {
@@ -78,35 +86,92 @@ const App: React.FC = () => {
     return mix.reduce((acc, curr) => acc + curr.grams, 0);
   }, [mix]);
 
-  // SECRET TRIGGER LOGIC
+  // SECRET TRIGGER (To open PIN Pad)
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
     if (secretClicks > 0) {
-      // Reset clicks if user stops clicking for 1 second
       timer = setTimeout(() => setSecretClicks(0), 800);
     }
     if (secretClicks >= 7) {
-      setShowPinPad(true);
+      handleOpenPinPad();
       setSecretClicks(0);
     }
     return () => clearTimeout(timer);
   }, [secretClicks]);
 
+  // LOCK CLICK (To open Change PIN Mode)
+  useEffect(() => {
+    if (lockClickCount >= 12) {
+        setIsChangingPin(true);
+        setLockClickCount(0);
+    }
+  }, [lockClickCount]);
+
   const handleSecretClick = () => {
     setSecretClicks(prev => prev + 1);
   };
 
+  // Logic: Fetch actual PIN from Cloud first, then allow input
+  const handleOpenPinPad = async () => {
+      setShowPinPad(true);
+      setIsFetchingPin(true);
+      try {
+          // Force fetch to get the latest PIN from Cloud
+          const { pin } = await fetchFlavors();
+          if (pin && pin !== "undefined") {
+              console.log("Refreshed PIN from cloud:", pin);
+              setAdminPin(pin);
+          }
+      } catch (e) {
+          console.error("Error fetching latest pin", e);
+      } finally {
+          setIsFetchingPin(false);
+      }
+  };
+
   const handlePinSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (pinInput === '0000') {
+    // Strict check
+    const currentPin = adminPin || "0000";
+    if (pinInput === currentPin) {
         setIsAdminOpen(true);
         setShowPinPad(false);
         setPinInput('');
+        setLockClickCount(0);
     } else {
         alert("Неверный код");
         setPinInput('');
-        setShowPinPad(false);
     }
+  };
+
+  const handleChangePinSubmit = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (newPin.length !== 4) {
+          alert("ПИН должен быть 4 цифры");
+          return;
+      }
+      
+      setSavePinStatus('Сохранение...');
+      
+      // 1. Update local state immediately
+      setAdminPin(newPin);
+      
+      // 2. Save ONLY PIN to Cloud (Action: savePin)
+      const result = await saveGlobalPin(newPin);
+      
+      if (result.success) {
+          setSavePinStatus('Сохранено!');
+          setTimeout(() => {
+              setIsChangingPin(false);
+              setShowPinPad(false);
+              setNewPin('');
+              setSavePinStatus('');
+              setLockClickCount(0);
+          }, 1000);
+      } else {
+          setSavePinStatus('Ошибка!');
+          alert("Не удалось отправить ПИН: " + result.message);
+      }
   };
 
   // --- Flavor Management ---
@@ -142,7 +207,7 @@ const App: React.FC = () => {
   const clearBowl = () => {
     if(window.confirm("Очистить чашу?")) {
         setMix([]);
-        setAiAnalysis(null);
+        setMixName('');
     }
   };
 
@@ -150,51 +215,60 @@ const App: React.FC = () => {
 
   const handleSaveMix = () => {
     if (!user || mix.length === 0) return;
-    saveMixToHistory(user.id, mix, aiAnalysis || undefined);
+    
+    let finalName = mixName.trim();
+    if (!finalName) {
+        finalName = prompt("Назовите ваш микс:", "Мой вкусный микс") || "Микс без названия";
+        setMixName(finalName);
+    }
+
+    saveMixToHistory(user.id, mix, finalName);
     alert("Микс сохранен в историю!");
   };
 
   const handleShowMaster = () => {
     if (mix.length === 0) return;
-    // Auto-save when showing to master if not empty
     if (user) {
-        saveMixToHistory(user.id, mix, aiAnalysis || undefined);
+        saveMixToHistory(user.id, mix, mixName || "Заказ мастеру");
     }
     setIsMasterModeOpen(true);
   };
 
   const handleLoadFromHistory = (savedMix: SavedMix) => {
     setMix(savedMix.ingredients);
-    if (savedMix.aiAnalysis) {
-        setAiAnalysis(savedMix.aiAnalysis);
-    } else {
-        setAiAnalysis(null);
-    }
+    setMixName(savedMix.name);
     setIsHistoryOpen(false);
   };
 
   // --- Admin Actions ---
-  const handleUpdateFlavor = async (updatedFlavor: Flavor) => {
+  const handleUpdateFlavor = (updatedFlavor: Flavor) => {
     const newList = allFlavors.map(f => f.id === updatedFlavor.id ? updatedFlavor : f);
-    setAllFlavors(newList); // Optimistic UI
-    await saveStoredFlavors(newList);
+    setAllFlavors(newList); 
   };
 
-  const handleAddFlavor = async (newFlavor: Flavor) => {
+  const handleAddFlavor = (newFlavor: Flavor) => {
     const newList = [newFlavor, ...allFlavors];
-    setAllFlavors(newList); // Optimistic UI
-    await saveStoredFlavors(newList);
+    setAllFlavors(newList); 
   };
 
-  const handleResetFlavors = async () => {
-    if (window.confirm("Сбросить меню вкусов к стандартному набору? Это удалит созданные вкусы глобально.")) {
-        const defaults = await resetStoredFlavors();
-        setAllFlavors(defaults);
+  const handleResetFlavors = () => {
+    if (window.confirm("Сбросить локальный список?")) {
+        setAllFlavors(AVAILABLE_FLAVORS);
     }
   };
 
+  // Handle close on modal click outside
+  const handleClosePinPad = () => {
+      setShowPinPad(false);
+      setPinInput('');
+      setLockClickCount(0);
+      setIsChangingPin(false);
+      setNewPin('');
+      setIsFetchingPin(false);
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 pb-24 font-sans selection:bg-emerald-500 selection:text-white">
+    <div className="min-h-screen bg-slate-950 text-slate-200 pb-28 font-sans selection:bg-emerald-500 selection:text-white">
       
       {/* Header */}
       <header className="sticky top-0 z-40 bg-slate-950/80 backdrop-blur-md border-b border-slate-800">
@@ -205,9 +279,6 @@ const App: React.FC = () => {
           >
              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-600 to-teal-600 flex items-center justify-center text-white shadow-lg shadow-emerald-900/20 relative">
                <Leaf size={18} fill="currentColor" className="text-white/90" />
-               {isCloudConnected && (
-                 <span className="absolute -top-1 -right-1 w-3 h-3 bg-blue-500 rounded-full border-2 border-slate-950" title="Облако подключено"></span>
-               )}
              </div>
              <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400 hidden sm:block">
                Кальянный<span className="text-emerald-400">Алхимик</span>
@@ -247,17 +318,9 @@ const App: React.FC = () => {
         <div className="flex justify-between items-end mb-4 px-1">
             <div>
                 <h2 className="text-lg font-semibold text-white">Ингредиенты</h2>
-                <div className="flex items-center gap-2">
-                    <p className="text-xs text-slate-400">
-                    {totalWeight === MAX_BOWL_SIZE ? 'Чаша полна' : `осталось ${MAX_BOWL_SIZE - totalWeight}г`}
-                    </p>
-                    {isCloudConnected && (
-                        <span className="flex items-center gap-1 text-[10px] text-blue-400 bg-blue-900/20 px-1.5 py-0.5 rounded border border-blue-500/20">
-                            <Wifi size={10} />
-                            ONLINE
-                        </span>
-                    )}
-                </div>
+                <p className="text-xs text-slate-400">
+                {totalWeight === MAX_BOWL_SIZE ? 'Чаша полна' : `осталось ${MAX_BOWL_SIZE - totalWeight}г`}
+                </p>
             </div>
             <button
                 onClick={() => setIsSelectorOpen(true)}
@@ -268,8 +331,15 @@ const App: React.FC = () => {
             </button>
         </div>
 
+        {/* Loading State */}
+        {isLoading && mix.length === 0 && (
+            <div className="bg-slate-900/30 rounded-xl p-4 mb-6 text-center animate-pulse border border-slate-800">
+                <p className="text-sm text-slate-500">Загрузка вкусов из облака...</p>
+            </div>
+        )}
+
         {/* List Controls */}
-        <section className="space-y-6">
+        <section className="space-y-6 mb-8">
             <MixControls 
                 mix={mix}
                 onUpdateGrams={updateGrams}
@@ -277,9 +347,23 @@ const App: React.FC = () => {
                 totalWeight={totalWeight}
             />
         </section>
-
-        {/* AI Section */}
-        <AiAssistant mix={mix} onAnalysisComplete={setAiAnalysis} />
+        
+        {/* Mix Naming */}
+        {mix.length > 0 && (
+            <section className="bg-slate-900/50 p-4 rounded-xl border border-slate-800 mb-6">
+                <label className="block text-xs text-slate-500 mb-2 uppercase font-bold tracking-wide">Подпись микса</label>
+                <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-3 border border-slate-700 focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500 transition-all">
+                    <PenLine size={16} className="text-slate-400" />
+                    <input 
+                        type="text"
+                        value={mixName}
+                        onChange={(e) => setMixName(e.target.value)}
+                        placeholder="Придумайте название (например: Ягодный взрыв)"
+                        className="w-full bg-transparent py-3 text-white placeholder-slate-500 focus:outline-none text-sm"
+                    />
+                </div>
+            </section>
+        )}
 
         {/* Bottom Action Bar */}
         {mix.length > 0 && (
@@ -332,7 +416,7 @@ const App: React.FC = () => {
             mix={mix}
             totalWeight={totalWeight}
             user={user}
-            aiAnalysis={aiAnalysis}
+            mixName={mixName}
         />
       )}
 
@@ -344,28 +428,106 @@ const App: React.FC = () => {
         onUpdateFlavor={handleUpdateFlavor}
         onAddFlavor={handleAddFlavor}
         onResetFlavors={handleResetFlavors}
+        setAllFlavors={setAllFlavors}
+        customBrands={customBrands}
+        setCustomBrands={setCustomBrands}
+        currentPin={adminPin}
       />
 
       {/* Secret PIN Modal */}
       {showPinPad && (
-        <div className="fixed inset-0 z-[90] bg-black/90 flex items-center justify-center p-4">
-            <form onSubmit={handlePinSubmit} className="bg-slate-900 p-6 rounded-2xl border border-slate-700 shadow-2xl w-64 text-center">
-                <Lock className="mx-auto text-emerald-500 mb-4" size={32} />
-                <p className="text-white mb-4 font-bold">Доступ администратора</p>
-                <input 
-                    autoFocus
-                    type="password" 
-                    maxLength={4}
-                    placeholder="PIN" 
-                    className="w-full bg-slate-800 text-center text-2xl tracking-widest py-2 rounded-lg text-white mb-4 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    value={pinInput}
-                    onChange={(e) => setPinInput(e.target.value)}
-                />
-                <div className="flex gap-2">
-                    <button type="button" onClick={() => setShowPinPad(false)} className="flex-1 py-2 bg-slate-800 text-slate-400 rounded-lg">Отмена</button>
-                    <button type="submit" className="flex-1 py-2 bg-emerald-600 text-white rounded-lg font-bold">Вход</button>
-                </div>
-            </form>
+        <div className="fixed inset-0 z-[90] bg-black/90 flex items-center justify-center p-4 animate-in fade-in duration-200">
+            <div className="bg-slate-900 p-6 rounded-2xl border border-slate-700 shadow-2xl w-72 text-center relative">
+                
+                {isFetchingPin ? (
+                    <div className="flex flex-col items-center py-6">
+                        <Loader2 className="animate-spin text-emerald-500 mb-2" size={32} />
+                        <p className="text-slate-400 text-sm">Проверка PIN в облаке...</p>
+                    </div>
+                ) : !isChangingPin ? (
+                    // Standard Login Mode
+                    <form onSubmit={handlePinSubmit}>
+                        {/* The Secret Lock Button */}
+                        <div className="mb-4 flex justify-center">
+                            <button 
+                                type="button" 
+                                onClick={() => setLockClickCount(p => p + 1)}
+                                className="active:scale-90 transition-transform p-2 rounded-full hover:bg-slate-800"
+                            >
+                                <Lock 
+                                    className={`${lockClickCount > 0 ? 'text-emerald-400' : 'text-emerald-600'}`} 
+                                    size={32} 
+                                />
+                            </button>
+                        </div>
+                        
+                        <p className="text-white mb-4 font-bold">Доступ администратора</p>
+                        
+                        <input 
+                            autoFocus
+                            type="password" 
+                            maxLength={4}
+                            placeholder="PIN" 
+                            className="w-full bg-slate-800 text-center text-2xl tracking-widest py-3 rounded-xl text-white mb-4 focus:outline-none focus:ring-2 focus:ring-emerald-500 border border-slate-700"
+                            value={pinInput}
+                            onChange={(e) => setPinInput(e.target.value)}
+                        />
+                        
+                        <div className="flex gap-2">
+                            <button 
+                                type="button" 
+                                onClick={handleClosePinPad} 
+                                className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl transition-colors"
+                            >
+                                Отмена
+                            </button>
+                            <button 
+                                type="submit" 
+                                className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold transition-colors"
+                            >
+                                Вход
+                            </button>
+                        </div>
+                    </form>
+                ) : (
+                    // Change PIN Mode (Activated after 12 lock clicks)
+                    <form onSubmit={handleChangePinSubmit}>
+                        <RefreshCcw className="mx-auto text-indigo-400 mb-4 animate-spin-slow" size={32} />
+                        <p className="text-white mb-2 font-bold">Смена Глобального PIN</p>
+                        <p className="text-xs text-slate-400 mb-4">Новый ПИН будет сохранен в ячейке H2 таблицы.</p>
+                        
+                        <input 
+                            autoFocus
+                            type="text" 
+                            pattern="\d*"
+                            maxLength={4}
+                            placeholder="0000" 
+                            className="w-full bg-indigo-900/20 text-center text-2xl tracking-widest py-3 rounded-xl text-white mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500 border border-indigo-500/30"
+                            value={newPin}
+                            onChange={(e) => setNewPin(e.target.value)}
+                        />
+                        
+                        {savePinStatus && <p className="text-xs text-indigo-300 mb-2 animate-pulse">{savePinStatus}</p>}
+
+                        <div className="flex gap-2">
+                             <button 
+                                type="button" 
+                                onClick={handleClosePinPad} 
+                                className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl transition-colors"
+                            >
+                                Отмена
+                            </button>
+                            <button 
+                                type="submit" 
+                                disabled={!!savePinStatus && savePinStatus !== 'Ошибка!'}
+                                className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold transition-colors"
+                            >
+                                Сохранить
+                            </button>
+                        </div>
+                    </form>
+                )}
+            </div>
         </div>
       )}
 

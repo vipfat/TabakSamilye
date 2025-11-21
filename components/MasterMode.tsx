@@ -1,6 +1,6 @@
 import React from 'react';
-import { MixIngredient, AiAnalysisResult, TelegramUser } from '../types';
-import { X, Share2 } from 'lucide-react';
+import { MixIngredient, TelegramUser } from '../types';
+import { X } from 'lucide-react';
 import BowlChart from './BowlChart';
 
 interface MasterModeProps {
@@ -9,10 +9,10 @@ interface MasterModeProps {
   mix: MixIngredient[];
   totalWeight: number;
   user: TelegramUser;
-  aiAnalysis: AiAnalysisResult | null;
+  mixName: string;
 }
 
-const MasterMode: React.FC<MasterModeProps> = ({ isOpen, onClose, mix, totalWeight, user, aiAnalysis }) => {
+const MasterMode: React.FC<MasterModeProps> = ({ isOpen, onClose, mix, totalWeight, user, mixName }) => {
   if (!isOpen) return null;
 
   return (
@@ -50,11 +50,10 @@ const MasterMode: React.FC<MasterModeProps> = ({ isOpen, onClose, mix, totalWeig
             ))}
         </div>
 
-        {aiAnalysis && (
-            <div className="mt-8 p-4 bg-emerald-900/20 border border-emerald-500/30 rounded-xl text-center w-full max-w-md">
-                <p className="text-emerald-200 text-lg font-serif italic">"{aiAnalysis.title}"</p>
-            </div>
-        )}
+        <div className="mt-8 p-4 bg-emerald-900/20 border border-emerald-500/30 rounded-xl text-center w-full max-w-md">
+            <p className="text-slate-400 text-xs uppercase tracking-widest mb-1">Название микса</p>
+            <p className="text-emerald-200 text-2xl font-serif italic">"{mixName || 'Без названия'}"</p>
+        </div>
 
         <div className="mt-auto pt-8 pb-4 text-slate-500 text-xs text-center">
            Покажите этот экран кальянному мастеру

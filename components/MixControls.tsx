@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { MixIngredient } from '../types';
 import { X } from 'lucide-react';
@@ -36,13 +37,16 @@ const MixControls: React.FC<MixControlsProps> = ({ mix, onUpdateGrams, onRemove,
                 style={{ width: `${(ingredient.grams / MAX_BOWL_SIZE) * 100}%` }}
             />
 
-            <div className="flex justify-between items-center mb-3">
+            <div className="flex justify-between items-start mb-3">
               <div className="flex items-center gap-3">
                 <div 
-                  className="w-4 h-4 rounded-full shadow-sm border border-slate-600" 
+                  className="w-4 h-4 rounded-full shadow-sm border border-slate-600 mt-1" 
                   style={{ backgroundColor: ingredient.color }} 
                 />
-                <span className="font-medium text-slate-100">{ingredient.name}</span>
+                <div>
+                    <div className="font-medium text-slate-100 leading-tight">{ingredient.name}</div>
+                    <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mt-0.5">{ingredient.brand}</div>
+                </div>
               </div>
               <button 
                 onClick={() => onRemove(ingredient.id)}
